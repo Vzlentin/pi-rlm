@@ -1,0 +1,44 @@
+{
+  "name": "pi-rlm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Recursive language-model child calls for Pi's ipython tool, backed by librlm",
+  "keywords": [
+    "pi-package",
+    "ipython",
+    "rlm"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test:host": "node --no-warnings tests/test_host_cancellation.mjs",
+    "test:child": "node --no-warnings tests/test_child_completion.mjs",
+    "test:librlm": "node --no-warnings tests/test_librlm.mjs",
+    "test:kernel": "node --no-warnings tests/test_kernel.mjs",
+    "test:benchmarks": "python3 -m unittest tests.test_oolong_benchmark tests.test_longbench_benchmark",
+    "test": "npm run typecheck && npm run test:host && npm run test:child && npm run test:librlm && npm run test:benchmarks && npm run test:kernel",
+    "test:integration": "python3 -m unittest tests.integration.test_acceptance",
+    "test:integration:full": "PI_RLM_TEST_INCLUDE_LARGE=1 python3 -m unittest tests.integration.test_acceptance",
+    "eval:oolong": "uv run --python 3.12 --with-requirements benchmarks/requirements.txt python -m benchmarks.oolong",
+    "eval:longbench": "uv run --python 3.12 --with-requirements benchmarks/requirements.txt python -m benchmarks.longbench"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/rlm.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@types/node": "22.19.7",
+    "typescript": "5.9.3"
+  }
+}

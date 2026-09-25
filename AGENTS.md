@@ -1,0 +1,7 @@
+- pi-rlm plugs into pi-ipython only through the `ipython:kernel-starting` event and the `ipython` tool's Pi events. Do not import pi-ipython code from the extension.
+- librlm owns the kernel side (`rlm/ipython_extension.py`) and the RLM instructions (`rlm/prompts/ipython.json`). Do not vendor librlm into this package. Keep `HOST_PROTOCOL_VERSION`, request and response shapes, authentication, size limits and timeouts synchronized with librlm.
+- Test by executing the host and kernel and observing results, not by matching source strings or repeating implementation constants. No tautological tests.
+- Keep RLM children fresh, tool-free, depth-1 completions with no inherited skills, prompt templates, context files, or transcript. They inherit only the active model, thinking level, working directory, explicit task and explicit context.
+- Do not eagerly discard live child handles after a successful cell. Cross-cell handles are supported.
+- Never set `RLM_HOST_SOCKET` or `RLM_HOST_TOKEN` on Pi's own process; they belong to the kernel environment.
+- Run `npm test` for every code change. Run `PI_RLM_TEST_MODEL=<provider/model> npm run test:integration` when changing the host protocol, child completions, usage attribution, cancellation, or cleanup.

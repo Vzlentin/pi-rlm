@@ -1,0 +1,6 @@
+node_modules/
+benchmark-results/
+**/__pycache__/
+*.py[cod]
+.coverage
+.DS_Store
