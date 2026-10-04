@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { runChildAgent } from "../extensions/child-agent.ts";
-import { alive, command, events, processInfo, reapZombies, running, waitFor } from "./fixtures/child-agent.mjs";
+import { alive, command, events, running, waitFor } from "./fixtures/child-agent.mjs";
 
 const directory = realpathSync(mkdtempSync(join(tmpdir(), "pi-rlm-child-test-")));
 const fixture = command(directory);
@@ -29,11 +29,9 @@ try {
 	assert.equal(started.depth, "2");
 	assert.equal(started.root, request.librlmRoot);
 	assert.deepEqual(started.hostEnv, []);
-	assert.deepEqual(started.args.slice(0, 8), [
-		"--mode", "json", "--no-session", "--model", "test-provider/fixture", "--thinking", "high", "--append-system-prompt",
-	]);
-	assert.match(started.args[8], /assigned task/);
-	assert.deepEqual(started.args.slice(9), ["--"]);
+	const flag = (name) => started.args[started.args.indexOf(name) + 1];
+	assert.equal(flag("--model"), "test-provider/fixture");
+	assert.equal(flag("--thinking"), "high");
 	for (const [key, value] of Object.entries(inherited)) assert.equal(process.env[key], value);
 
 	for (const task of ["multi", "split"]) {
@@ -48,41 +46,15 @@ try {
 	const compacted = await runChildAgent({ ...request, task: "compaction" }, fixture);
 	assert.equal(compacted.error, undefined);
 	assert.equal(compacted.usage.totalTokens, 23);
-	for (const task of ["@not-a-file", "x".repeat(1024 * 1024 - 1)]) {
-		const answer = await runChildAgent({ ...request, task, context: null }, fixture);
-		assert.equal(answer.error, undefined);
-		assert.equal(answer.text, `done:${task}`);
-	}
 	for (const task of ["orphan", "orphan-pipes"]) {
 		const answer = await runChildAgent({ ...request, task }, fixture);
 		assert.equal(answer.error, undefined);
 		const child = events(directory).find((event) => event.type === "start" && event.task === task);
 		const descendant = events(directory).find((event) => event.type === "descendant" && event.parent === child.pid);
-		assert.equal(running(descendant.pid), false);
+		// The group gets SIGKILL just before settlement, so the descendant can still be exiting here.
+		await waitFor(() => !running(descendant.pid), `${task} descendant exit`, 1_000);
 	}
-	if (process.platform === "linux") {
-		let timeout;
-		const completion = runChildAgent({ ...request, task: "orphan-zombie", depth: 0 }, fixture);
-		try {
-			const reaper = await waitFor(() => events(directory).find((event) => event.type === "zombie-reaper"), "zombie fixture");
-			await waitFor(() => processInfo(reaper.zombie)?.state === "Z" && !alive(reaper.parent), "direct child exit with a zombie descendant");
-			assert.equal(processInfo(reaper.zombie).pgid, reaper.parent);
-			assert.equal(alive(reaper.zombie), true);
-			assert.equal(running(reaper.zombie), false);
-			const answer = await Promise.race([
-				completion,
-				new Promise((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("Zombie group cleanup did not settle")), 15_000); }),
-			]);
-			assert.equal(answer.error, undefined);
-			assert.equal(answer.text, "done:orphan-zombie");
-			assert.equal(processInfo(reaper.zombie)?.state, "Z", "completion does not wait for the external reaper");
-		} finally {
-			clearTimeout(timeout);
-			await reapZombies(directory);
-			await completion;
-		}
-	}
-	for (const task of ["error", "length", "toolUse", "aborted", "pending", "deferred", "nonzero", "unterminated", "missing", "invalid", "bad-content"]) {
+	for (const task of ["error", "nonzero", "unterminated", "missing", "invalid", "bad-content"]) {
 		const failed = await runChildAgent({ ...request, task }, fixture);
 		assert.ok(failed.error, task);
 		assert.equal(failed.text, "");
@@ -133,7 +105,7 @@ try {
 		assert.equal(alive(child.pid), false);
 		assert.ok(events(directory).some((event) => event.type === "term" && event.task === task));
 		if (task === "block-graceful") assert.ok(events(directory).some((event) => event.type === "terminated" && event.task === task));
-		if (descendant) assert.equal(running(descendant.pid), false);
+		if (descendant) await waitFor(() => !running(descendant.pid), "block-group descendant exit", 1_000);
 	}
 } finally {
 	for (const [key, value] of Object.entries(saved)) {

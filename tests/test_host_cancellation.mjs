@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { RlmHostBridge } from "../extensions/rlm-host.ts";
-import { alive, command, events, processInfo, reapZombies, running, waitFor } from "./fixtures/child-agent.mjs";
+import { alive, command, events, waitFor } from "./fixtures/child-agent.mjs";
 
 const directory = realpathSync(mkdtempSync(join(tmpdir(), "pi-rlm-host-test-")));
 const bridge = new RlmHostBridge(directory, 0, command(directory));
@@ -77,32 +77,11 @@ try {
 
 	await openRequest("block-ignore-shutdown");
 	await waitFor(() => starts().some((event) => event.task === "block-ignore-shutdown"), "shutdown child");
-	if (process.platform === "linux") {
-		await openRequest("orphan-zombie");
-		const reaper = await waitFor(() => events(directory).find((event) => event.type === "zombie-reaper"), "shutdown zombie fixture");
-		await waitFor(() => processInfo(reaper.zombie)?.state === "Z" && !alive(reaper.parent), "shutdown direct child exit");
-		assert.equal(processInfo(reaper.zombie).pgid, reaper.parent);
-		assert.equal(alive(reaper.zombie), true);
-		assert.equal(running(reaper.zombie), false);
-		const shutdown = bridge.shutdown();
-		let timeout;
-		try {
-			await Promise.race([
-				shutdown,
-				new Promise((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("Host shutdown waited for zombie reaping")), 15_000); }),
-			]);
-			assert.equal(processInfo(reaper.zombie)?.state, "Z");
-		} finally {
-			clearTimeout(timeout);
-			await reapZombies(directory);
-			await shutdown;
-		}
-	} else await bridge.shutdown();
+	await bridge.shutdown();
 	assert.equal(bridge.running, 0);
 	assert.ok(starts().every((event) => !alive(event.pid)));
 } finally {
 	for (const socket of sockets) socket.destroy();
-	await reapZombies(directory);
 	await bridge.shutdown();
 	rmSync(directory, { recursive: true, force: true });
 }

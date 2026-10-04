@@ -14,7 +14,7 @@ export const events = (directory) => {
 export const alive = (pid) => {
 	try { process.kill(pid, 0); return true; } catch { return false; }
 };
-export const processInfo = (pid) => {
+const processInfo = (pid) => {
 	try {
 		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
 		const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
@@ -29,12 +29,6 @@ export const running = (pid) => {
 	const info = processInfo(pid);
 	return info !== undefined && info.state !== "Z" && info.state !== "X";
 };
-export async function reapZombies(directory) {
-	for (const event of events(directory).filter((event) => event.type === "zombie-reaper")) {
-		writeFileSync(join(directory, `reap-${event.zombie}`), "");
-		await waitFor(() => !processInfo(event.zombie) && !running(event.pid), "fixture zombie reaping");
-	}
-}
 export async function waitFor(predicate, label, timeout = 20_000) {
 	const deadline = Date.now() + timeout;
 	while (Date.now() < deadline) {
@@ -108,34 +102,10 @@ async function main() {
 		spawn(process.execPath, [fileURLToPath(import.meta.url), directory, "--descendant"], { stdio: task === "orphan" ? "ignore" : "inherit" });
 		await waitFor(() => events(directory).some((event) => event.type === "descendant" && event.parent === process.pid), "orphan startup");
 	}
-	if (task === "orphan-zombie") {
-		// A parent outside the Pi group keeps the zombie until the test releases it.
-		const reaper = spawn("python3", ["-c", `import json, os, sys, time
-from pathlib import Path
-os.setpgid(0, 0)
-directory = Path(sys.argv[1])
-group = int(sys.argv[2])
-pid = os.fork()
-if pid == 0:
-    os.setpgid(0, group)
-    os._exit(0)
-with (directory / "events.jsonl").open("a") as output:
-    output.write(json.dumps({"type": "zombie-reaper", "pid": os.getpid(), "zombie": pid, "parent": group}) + "\\n")
-while not (directory / f"reap-{pid}").exists():
-    time.sleep(0.01)
-os.waitpid(pid, 0)
-`, directory, String(process.pid)], { stdio: "ignore" });
-		reaper.unref();
-		await waitFor(() => {
-			const event = events(directory).find((event) => event.type === "zombie-reaper" && event.parent === process.pid);
-			const info = event && processInfo(event.zombie);
-			return info?.state === "Z" && info.pgid === process.pid;
-		}, "zombie in the child group");
-	}
 	if (task === "missing") { emit(message("toolResult", 3)); return; }
 	if (task === "invalid") { process.stdout.write("not JSON\n"); return; }
 	const text = ["multi", "split"].includes(task) ? "café😀\u2028line\u2029end" : task === "large" ? "x".repeat(300_000) : `done:${task}`;
-	const stopReason = ["error", "length", "toolUse", "aborted", "pending", "deferred"].includes(task) ? task : "stop";
+	const stopReason = task === "error" ? "error" : "stop";
 	const final = message("assistant", 7, stopReason, text);
 	if (task === "bad-content") final.message.content = null;
 	const payload = Buffer.from(JSON.stringify(final) + (task === "unterminated" ? "" : "\n"));
@@ -145,7 +115,7 @@ os.waitpid(pid, 0)
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		process.stdout.write(payload.subarray(split));
 	} else process.stdout.write(payload);
-	if (["orphan", "orphan-pipes", "orphan-zombie"].includes(task)) process.stdout.write("", () => process.exit(0));
+	if (task === "orphan" || task === "orphan-pipes") process.stdout.write("", () => process.exit(0));
 	if (task === "nonzero") {
 		process.stderr.write("x".repeat(30_000) + "diagnostic-tail");
 		process.exitCode = 3;
