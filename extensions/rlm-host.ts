@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Usage } from "@earendil-works/pi-ai";
 import { formatSize, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { runChildAgent, TERMINATION_GRACE_MS, type ChildAgentCommand } from "./child-agent.ts";
+import { runChildAgent, type ChildAgentCommand } from "./child-agent.ts";
 
 export const MAX_CHILDREN_RUNNING = 4;
 export const MAX_LIVE_HANDLES = 16;
@@ -213,7 +213,6 @@ export class RlmHostBridge {
 		return {
 			RLM_HOST_SOCKET: this.socketPath,
 			RLM_HOST_TOKEN: this.authToken,
-			RLM_HOST_CHILD_TIMEOUT_SECONDS: String((CHILD_DEADLINE_MS + TERMINATION_GRACE_MS * MAX_RLM_DEPTH + 10_000) / 1_000),
 		};
 	}
 
