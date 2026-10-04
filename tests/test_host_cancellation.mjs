@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { RlmHostBridge } from "../extensions/rlm-host.ts";
-import { alive, command, events, waitFor } from "./fixtures/child-agent.mjs";
+import { alive, command, events, processInfo, reapZombies, running, waitFor } from "./fixtures/child-agent.mjs";
 
 const directory = realpathSync(mkdtempSync(join(tmpdir(), "pi-rlm-host-test-")));
 const bridge = new RlmHostBridge(directory, 0, command(directory));
@@ -34,14 +34,14 @@ async function response(task, overrides = {}) {
 try {
 	await bridge.ensureStarted();
 	bridge.setConfig({ cwd: process.cwd(), model: { provider: "test", id: "fixture" }, thinkingLevel: "off" });
-	const running = await Promise.all([0, 1, 2, 3].map((index) => openRequest(`block-ignore-${index}`)));
+	const runningSockets = await Promise.all([0, 1, 2, 3].map((index) => openRequest(`block-ignore-${index}`)));
 	await waitFor(() => starts().length === 4, "four admitted child requests");
 	const queued = await openRequest("block-queued");
 	await waitFor(() => bridge.running === 5, "the queued fifth child record");
 	assert.equal(starts().length, 4);
 
 	const disconnected = starts().find((event) => event.task === "block-ignore-0");
-	running[0].destroy();
+	runningSockets[0].destroy();
 	await waitFor(() => events(directory).some((event) => event.type === "term"), "disconnect SIGTERM");
 	assert.equal(starts().length, 4, "admission stays held until the child exits");
 	assert.equal(alive(disconnected.pid), true);
@@ -55,7 +55,7 @@ try {
 	await waitFor(() => bridge.running === 4, "queued disconnect");
 	assert.equal(starts().length, 5);
 	queued.destroy();
-	for (const socket of running) socket.destroy();
+	for (const socket of runningSockets) socket.destroy();
 	await waitFor(() => bridge.running === 0, "all disconnected children settle");
 	assert.ok(starts().every((event) => !alive(event.pid)));
 	const activity = bridge.takeActivity();
@@ -77,11 +77,32 @@ try {
 
 	await openRequest("block-ignore-shutdown");
 	await waitFor(() => starts().some((event) => event.task === "block-ignore-shutdown"), "shutdown child");
-	await bridge.shutdown();
+	if (process.platform === "linux") {
+		await openRequest("orphan-zombie");
+		const reaper = await waitFor(() => events(directory).find((event) => event.type === "zombie-reaper"), "shutdown zombie fixture");
+		await waitFor(() => processInfo(reaper.zombie)?.state === "Z" && !alive(reaper.parent), "shutdown direct child exit");
+		assert.equal(processInfo(reaper.zombie).pgid, reaper.parent);
+		assert.equal(alive(reaper.zombie), true);
+		assert.equal(running(reaper.zombie), false);
+		const shutdown = bridge.shutdown();
+		let timeout;
+		try {
+			await Promise.race([
+				shutdown,
+				new Promise((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("Host shutdown waited for zombie reaping")), 15_000); }),
+			]);
+			assert.equal(processInfo(reaper.zombie)?.state, "Z");
+		} finally {
+			clearTimeout(timeout);
+			await reapZombies(directory);
+			await shutdown;
+		}
+	} else await bridge.shutdown();
 	assert.equal(bridge.running, 0);
 	assert.ok(starts().every((event) => !alive(event.pid)));
 } finally {
 	for (const socket of sockets) socket.destroy();
+	await reapZombies(directory);
 	await bridge.shutdown();
 	rmSync(directory, { recursive: true, force: true });
 }

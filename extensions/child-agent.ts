@@ -66,7 +66,11 @@ export async function runChildAgent(
 			// Leave time for Pi's detached kernels and deeper children to stop first.
 			const grace = TERMINATION_GRACE_MS * Math.max(1, MAX_RLM_DEPTH - request.depth);
 			signalGroup("SIGTERM");
-			const force = setTimeout(() => signalGroup("SIGKILL"), grace);
+			const force = setTimeout(() => {
+				signalGroup("SIGKILL");
+				clearInterval(poll);
+				resolve();
+			}, grace);
 			const poll = setInterval(() => {
 				if (child.pid) {
 					try { process.kill(-child.pid, 0); return; } catch {}

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { runChildAgent } from "../extensions/child-agent.ts";
-import { alive, command, events, waitFor } from "./fixtures/child-agent.mjs";
+import { alive, command, events, processInfo, reapZombies, running, waitFor } from "./fixtures/child-agent.mjs";
 
 const directory = realpathSync(mkdtempSync(join(tmpdir(), "pi-rlm-child-test-")));
 const fixture = command(directory);
@@ -58,7 +58,29 @@ try {
 		assert.equal(answer.error, undefined);
 		const child = events(directory).find((event) => event.type === "start" && event.task === task);
 		const descendant = events(directory).find((event) => event.type === "descendant" && event.parent === child.pid);
-		assert.equal(alive(descendant.pid), false);
+		assert.equal(running(descendant.pid), false);
+	}
+	if (process.platform === "linux") {
+		let timeout;
+		const completion = runChildAgent({ ...request, task: "orphan-zombie", depth: 0 }, fixture);
+		try {
+			const reaper = await waitFor(() => events(directory).find((event) => event.type === "zombie-reaper"), "zombie fixture");
+			await waitFor(() => processInfo(reaper.zombie)?.state === "Z" && !alive(reaper.parent), "direct child exit with a zombie descendant");
+			assert.equal(processInfo(reaper.zombie).pgid, reaper.parent);
+			assert.equal(alive(reaper.zombie), true);
+			assert.equal(running(reaper.zombie), false);
+			const answer = await Promise.race([
+				completion,
+				new Promise((_resolve, reject) => { timeout = setTimeout(() => reject(new Error("Zombie group cleanup did not settle")), 15_000); }),
+			]);
+			assert.equal(answer.error, undefined);
+			assert.equal(answer.text, "done:orphan-zombie");
+			assert.equal(processInfo(reaper.zombie)?.state, "Z", "completion does not wait for the external reaper");
+		} finally {
+			clearTimeout(timeout);
+			await reapZombies(directory);
+			await completion;
+		}
 	}
 	for (const task of ["error", "length", "toolUse", "aborted", "pending", "deferred", "nonzero", "unterminated", "missing", "invalid", "bad-content"]) {
 		const failed = await runChildAgent({ ...request, task }, fixture);
@@ -111,7 +133,7 @@ try {
 		assert.equal(alive(child.pid), false);
 		assert.ok(events(directory).some((event) => event.type === "term" && event.task === task));
 		if (task === "block-graceful") assert.ok(events(directory).some((event) => event.type === "terminated" && event.task === task));
-		if (descendant) await waitFor(() => !alive(descendant.pid), "descendant termination");
+		if (descendant) assert.equal(running(descendant.pid), false);
 	}
 } finally {
 	for (const [key, value] of Object.entries(saved)) {

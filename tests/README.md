@@ -5,7 +5,10 @@ sessions, librlm location and update, benchmark data-isolation tests, and a real
 kernel test through pi-ipython: the prompt section, cross-cell handles, usage
 attribution, `rlm.final`, cwd, gather cancellation, and depth rejection. Child
 cleanup also checks active child and grandchild kernels that ignore SIGINT and
-SIGTERM.
+SIGTERM, and real Pi shutdown with default persistence and a pending checkpoint.
+Linux-only orphan checks keep a zombie in the child process group until completion
+and host shutdown settle. The kernel deadline check runs for the full five-minute
+work deadline and checks that timeout usage reaches the kernel.
 
 The child cleanup and kernel tests need a pi-ipython checkout (`PI_IPYTHON_ROOT`, default
 `../pi-ipython`, with `npm install` run) and librlm (`RLM_LIBRLM_ROOT`, default

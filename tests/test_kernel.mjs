@@ -116,6 +116,16 @@ try {
 		assert.equal(interrupted.result.status, "error", interrupted.result.output);
 		await waitFor(() => !alive(blockedChild.pid), "aborted gather child termination");
 		assert.equal((await root.cell("print('rlm' in globals())")).result.output.trim(), "True");
+
+		const expired = await root.cell("import json\nhd = await rlm.spawn('block-ignore-deadline')\n[rd] = await rlm.gather([hd])\nprint(json.dumps({'status': rd.status, 'error': rd.error, 'usage': rd.usage, 'elapsed_ms': rd.elapsed_ms}))");
+		assert.equal(expired.result.status, "ok", expired.result.output);
+		const deadlineResult = JSON.parse(expired.result.output.trim());
+		assert.equal(deadlineResult.status, "timeout", deadlineResult.error);
+		assert.equal(deadlineResult.usage.totalTokens, 2);
+		assert.ok(deadlineResult.elapsed_ms >= 300_000, "the full five-minute work deadline is preserved");
+		assert.equal(expired.hook.usage.totalTokens, 2);
+		const deadlineChild = events(root.cwd).find((event) => event.type === "start" && event.task === "block-ignore-deadline");
+		assert.equal(alive(deadlineChild.pid), false);
 	} finally { await root.close(); }
 
 	const limited = session("2");
