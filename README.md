@@ -11,10 +11,14 @@ r.text if r.status == "ok" else r.error
 await rlm.final({"answer": r.text})
 ```
 
-Children are fresh, tool-free, depth-1 completions on the model and thinking level
-of the running `ipython` call. Handles survive across cells; a failed or cancelled
-cell cancels the children it spawned. `rlm.final` prints its value at the end of the
-cell's output (and in `details.final`) but does not end the turn.
+Children are fresh headless Pi agents on the model and thinking level of the
+running `ipython` call, in the kernel's working directory. They use normal Pi
+resource and tool discovery, with no parent transcript. Children can use their
+own IPython kernel and spawn grandchildren. At depth 2, child calls are rejected
+and the RLM prompt section is omitted, but kernel setup remains active.
+Handles survive across cells; a failed or cancelled cell cancels the children it
+spawned. `rlm.final` prints its value at the end of the cell's output (and in
+`details.final`) but does not end the turn.
 
 ## Install
 
@@ -40,13 +44,24 @@ prompt loudly.
 - On pi-ipython's `ipython:kernel-starting` event, pi-rlm starts its child host (a
   private Unix socket), passes `RLM_HOST_SOCKET` and `RLM_HOST_TOKEN` to the kernel
   only, and loads librlm's `rlm.ipython_extension` in the kernel. librlm owns
-  handles, gather, release and final inside the kernel; pi-rlm runs the child
-  completions through Pi's model registry.
-- Child usage is added to the `ipython` result's `usage`, with `details.nestedUsage`
+  handles, gather, release and final inside the kernel; pi-rlm runs each child
+  with `pi --mode json --no-session`, sends the framed task and context through
+  stdin, and reads the final assistant message. Cancellation sends SIGTERM to the child process group,
+  then SIGKILL if it does not stop within the grace period.
+- Child model, tool, and compaction usage is added to the `ipython` result's `usage`, with `details.nestedUsage`
   and `details.children` (`spawned`, `completed`) for the call during which it was
   observed. Running children are shown in the status line.
 - When `ipython` is active, the RLM API and guidance from librlm's
-  `rlm/prompts/ipython.json` are added as an `rlm` system prompt section.
+  `rlm/prompts/ipython.json` are added as an `rlm` system prompt section below
+  depth 2. `PI_RLM_DEPTH` defaults to 0 and must be a non-negative safe integer.
+
+Children need to discover pi-rlm, pi-ipython, and the selected provider through
+normal Pi configuration. Parent-only `-e` options and in-memory provider
+registrations do not transfer. The resolved `RLM_LIBRLM_ROOT` is passed to children;
+all `RLM_HOST_*` variables are removed so each child starts its own host.
+
+A compatible librlm prompt is required before release. A prompt that says children
+have no tools or filesystem access does not match this execution model.
 
 ## Tests
 

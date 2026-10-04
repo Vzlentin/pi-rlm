@@ -4,8 +4,9 @@ import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage, Context, Usage } from "@earendil-works/pi-ai";
+import type { Usage } from "@earendil-works/pi-ai";
 import { formatSize, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { runChildAgent, TERMINATION_GRACE_MS, type ChildAgentCommand } from "./child-agent.ts";
 
 export const MAX_CHILDREN_RUNNING = 4;
 export const MAX_LIVE_HANDLES = 16;
@@ -14,15 +15,10 @@ export const MAX_CHILD_TEXT_BYTES = 256 * 1024;
 const MAX_HOST_REQUEST_BYTES = MAX_CHILD_REQUEST_BYTES + 64 * 1024;
 export const MAX_HOST_RESPONSE_BYTES = 5 * 1024 * 1024;
 const CHILD_DEADLINE_MS = 5 * 60_000;
-const CHILD_CLEANUP_GRACE_MS = 2_000;
 const HOST_REQUEST_LINE_TIMEOUT_MS = 10_000;
 export const HOST_PROTOCOL_VERSION = 2;
 
-const CHILD_SYSTEM_PROMPT = [
-	"You are a focused child model in a recursive language-model computation.",
-	"Complete only the task in the user message using the supplied context.",
-	"You have no tools and no access to the parent transcript. Return a concise final answer.",
-].join("\n");
+export const MAX_RLM_DEPTH = 2;
 
 type ActiveModel = NonNullable<ExtensionContext["model"]>;
 type ThinkingLevel = NonNullable<ExtensionContext["thinkingLevel"]>;
@@ -32,15 +28,6 @@ export interface ChildConfig {
 	model?: ActiveModel;
 	thinkingLevel: ThinkingLevel;
 }
-
-export interface ChildCompletionRequest {
-	model: ActiveModel;
-	context: Context;
-	thinkingLevel: ThinkingLevel;
-	signal: AbortSignal;
-}
-
-export type CompleteChild = (request: ChildCompletionRequest) => Promise<AssistantMessage>;
 
 interface ChildResult {
 	status: "ok" | "error" | "cancelled" | "timeout";
@@ -181,20 +168,6 @@ class Semaphore {
 	}
 }
 
-async function settleChildrenWithin(records: readonly ChildRecord[]): Promise<void> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		await Promise.race([
-			Promise.allSettled(records.map((record) => record.promise)).then(() => undefined),
-			new Promise<void>((resolve) => {
-				timer = setTimeout(resolve, CHILD_CLEANUP_GRACE_MS);
-			}),
-		]);
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
-}
-
 export class RlmHostBridge {
 	private server?: Server;
 	private socketDirectory?: string;
@@ -203,7 +176,6 @@ export class RlmHostBridge {
 	private readonly children = new Set<ChildRecord>();
 	private readonly sockets = new Set<Socket>();
 	private readonly limiter = new Semaphore(MAX_CHILDREN_RUNNING);
-	private readonly completeChild: CompleteChild;
 	private starting?: Promise<void>;
 	private disposed = false;
 	private config?: ChildConfig;
@@ -211,8 +183,14 @@ export class RlmHostBridge {
 	/** Called whenever a child starts or settles. */
 	onActivity?: (activity: ChildActivity, running: number) => void;
 
-	constructor(completeChild: CompleteChild) {
-		this.completeChild = completeChild;
+	private readonly librlmRoot: string;
+	private readonly depth: number;
+	private readonly command?: ChildAgentCommand;
+
+	constructor(librlmRoot: string, depth = 0, command?: ChildAgentCommand) {
+		this.librlmRoot = librlmRoot;
+		this.depth = depth;
+		this.command = command;
 	}
 
 	/** Children use the config of the running (or most recent) ipython call. */
@@ -232,7 +210,11 @@ export class RlmHostBridge {
 
 	get environment(): Record<string, string> {
 		if (!this.socketPath) throw new Error("RLM host bridge has not started");
-		return { RLM_HOST_SOCKET: this.socketPath, RLM_HOST_TOKEN: this.authToken };
+		return {
+			RLM_HOST_SOCKET: this.socketPath,
+			RLM_HOST_TOKEN: this.authToken,
+			RLM_HOST_CHILD_TIMEOUT_SECONDS: String((CHILD_DEADLINE_MS + TERMINATION_GRACE_MS * MAX_RLM_DEPTH + 10_000) / 1_000),
+		};
 	}
 
 	async ensureStarted(): Promise<void> {
@@ -344,6 +326,7 @@ export class RlmHostBridge {
 			throw new Error("Host request requires string id and execution_id");
 		}
 		if (request.op !== "complete") throw new Error("Unknown host operation");
+		if (this.depth >= MAX_RLM_DEPTH) throw new Error(`RLM child depth limit (${MAX_RLM_DEPTH}) reached`);
 		if (typeof request.task !== "string" || (request.context !== null && typeof request.context !== "string")) {
 			throw new Error("complete requires a string task and optional string context");
 		}
@@ -371,7 +354,7 @@ export class RlmHostBridge {
 			promise: undefined as unknown as Promise<ChildResult>,
 			timedOut: false,
 		};
-		record.promise = this.runChild(record, config, request.task, request.context);
+		record.promise = this.runChild(record, config, request);
 		this.children.add(record);
 		this.activity.spawned += 1;
 		this.onActivity?.(this.activity, this.children.size);
@@ -397,8 +380,7 @@ export class RlmHostBridge {
 	private async runChild(
 		record: ChildRecord,
 		config: ChildConfig,
-		task: string,
-		context: string | null,
+		request: HostRequest,
 	): Promise<ChildResult> {
 		const started = Date.now();
 		let release: (() => void) | undefined;
@@ -411,34 +393,19 @@ export class RlmHostBridge {
 			release = await this.limiter.acquire(record.controller.signal);
 			if (record.controller.signal.aborted) throw new Error("Child cancelled before startup");
 			if (!config.model) throw new Error("No active model is available for child creation");
-			const prompt = context === null ? task : `${task}\n\n<context>\n${context}\n</context>`;
-			const response = await this.completeChild({
+			const response = await runChildAgent({
 				model: config.model,
 				thinkingLevel: config.thinkingLevel,
 				signal: record.controller.signal,
-				context: {
-					systemPrompt: CHILD_SYSTEM_PROMPT,
-					messages: [
-						{
-							role: "user",
-							content: [{ type: "text", text: prompt }],
-							timestamp: Date.now(),
-						},
-					],
-					tools: [],
-				},
-			});
+				cwd: request.cwd,
+				task: request.task,
+				context: request.context,
+				depth: this.depth,
+				librlmRoot: this.librlmRoot,
+			}, this.command);
 			usage = response.usage;
-			if (response.stopReason === "aborted") throw new Error(response.errorMessage || "Child was cancelled");
-			if (response.stopReason === "error") throw new Error(response.errorMessage || "Child model request failed");
-			if (response.stopReason !== "stop") {
-				throw new Error(`Child response was incomplete (${response.stopReason})`);
-			}
-			const text = response.content
-				.filter((part): part is Extract<(typeof response.content)[number], { type: "text" }> => part.type === "text")
-				.map((part) => part.text)
-				.join("");
-			const bounded = truncateUtf8(text, MAX_CHILD_TEXT_BYTES);
+			if (response.error) throw new Error(response.error);
+			const bounded = truncateUtf8(response.text, MAX_CHILD_TEXT_BYTES);
 			return {
 				status: "ok",
 				text: bounded.text,
@@ -482,7 +449,7 @@ export class RlmHostBridge {
 		if (server) await new Promise<void>((resolve) => server.close(() => resolve())).catch(() => {});
 		const records = [...this.children];
 		for (const record of records) record.controller.abort(new Error("RLM host bridge shutting down"));
-		await settleChildrenWithin(records);
+		await Promise.allSettled(records.map((record) => record.promise));
 		this.children.clear();
 		if (this.socketDirectory) await rm(this.socketDirectory, { recursive: true, force: true }).catch(() => {});
 		this.socketDirectory = undefined;

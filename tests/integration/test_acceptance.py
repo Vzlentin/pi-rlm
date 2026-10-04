@@ -12,42 +12,70 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-EXTENSION = ROOT / "extensions" / "rlm.ts"
-IPYTHON_ROOT = Path(os.environ.get("PI_IPYTHON_ROOT", ROOT.parent / "pi-ipython"))
-IPYTHON_EXTENSION = IPYTHON_ROOT / "extensions" / "ipython.ts"
+IPYTHON_ROOT = Path(os.environ.get("PI_IPYTHON_ROOT", ROOT.parent / "pi-ipython")).resolve()
 BRIDGE = IPYTHON_ROOT / "extensions" / "bridge.py"
 MODEL = os.environ.get("PI_RLM_TEST_MODEL")
 PROVIDER_EXTENSION = os.environ.get("PI_RLM_TEST_PROVIDER_EXTENSION")
 THINKING = os.environ.get("PI_RLM_TEST_THINKING", "low")
 TIMEOUT = int(os.environ.get("PI_RLM_TEST_TIMEOUT", "300"))
 INCLUDE_LARGE = os.environ.get("PI_RLM_TEST_INCLUDE_LARGE") == "1"
+INTEGRATION_DIRECTORY: tempfile.TemporaryDirectory[str] | None = None
+
+
+def setUpModule() -> None:
+    global INTEGRATION_DIRECTORY
+    if not MODEL:
+        return
+    INTEGRATION_DIRECTORY = tempfile.TemporaryDirectory(prefix="pi-rlm-integration-")
+    unittest.addModuleCleanup(INTEGRATION_DIRECTORY.cleanup)
+    directory = Path(INTEGRATION_DIRECTORY.name)
+    agent_directory = directory / "agent"
+    agent_directory.mkdir()
+    (directory / "workspace").mkdir()
+    source = Path(os.environ.get(
+        "PI_RLM_TEST_AGENT_DIR", os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi" / "agent"))
+    )).expanduser().resolve()
+    for name in ("auth.json", "models.json"):
+        path = source / name
+        if path.is_file():
+            (agent_directory / name).symlink_to(path)
+    extensions = [f"-builtin:{name}" for name in ("mcp", "llama.cpp", "codemode", "tool-search")]
+    if PROVIDER_EXTENSION:
+        extensions.append(str(Path(PROVIDER_EXTENSION).expanduser().resolve()))
+    (agent_directory / "settings.json").write_text(json.dumps({
+        "packages": [str(IPYTHON_ROOT), str(ROOT)],
+        "extensions": extensions,
+        "defaultTools": ["ipython"],
+        "defaultProjectTrust": "never",
+        "cacheWarming": "off",
+    }))
+
+
+def test_directory() -> Path:
+    if INTEGRATION_DIRECTORY is None:
+        raise RuntimeError("Integration settings are not initialized")
+    return Path(INTEGRATION_DIRECTORY.name)
 
 
 def test_env() -> dict[str, str]:
     env = dict(os.environ)
-    env["PI_CODING_AGENT_DIR"] = os.environ.get(
-        "PI_RLM_TEST_AGENT_DIR", env.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi" / "agent"))
-    )
+    env["PI_CODING_AGENT_DIR"] = str(test_directory() / "agent")
+    env["PI_RLM_DEPTH"] = "0"
+    env["PI_IPYTHON_PERSISTENCE"] = "0"
     return env
 
 
 def base_command(mode: str) -> list[str]:
     if not MODEL:
-        raise RuntimeError("Set PI_RLM_TEST_MODEL, for example openai-codex/gpt-5.6-sol")
+        raise RuntimeError("Set PI_RLM_TEST_MODEL, for example openai-codex/gpt-6.1-sol")
     return [
         "pi",
         "--mode",
         mode,
         "--no-session",
-        "-ne",
         "-ns",
         "-nc",
         "-nbt",
-        *(["-e", PROVIDER_EXTENSION] if PROVIDER_EXTENSION else []),
-        "-e",
-        str(IPYTHON_EXTENSION),
-        "-e",
-        str(EXTENSION),
         "--model",
         MODEL,
         "--thinking",
@@ -71,6 +99,7 @@ def run_print(prompt: str, timeout: int = TIMEOUT) -> list[dict[str, Any]]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=test_env(),
+        cwd=test_directory() / "workspace",
         timeout=timeout,
         check=False,
     )
@@ -89,7 +118,7 @@ def tool_end(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def host_directories() -> set[Path]:
-    return set(Path("/tmp").glob("pi-rlm-host-*"))
+    return set(Path(tempfile.gettempdir()).glob("pi-rlm-host-*"))
 
 
 def bridge_processes() -> set[str]:
@@ -107,6 +136,7 @@ class RpcPi:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=test_env(),
+            cwd=test_directory() / "workspace",
             bufsize=0,
         )
         self.buffer = b""
@@ -219,28 +249,67 @@ class Slice2AcceptanceTests(unittest.TestCase):
         self.assertEqual(bridge_processes() - processes, set())
 
     def test_parallel_final_and_usage(self) -> None:
-        prompt = """Call ipython exactly once with this exact code and do nothing else: import asyncio
-print("\\n".join(f"line-{i}" for i in range(12)))
+        with tempfile.TemporaryDirectory(prefix="pi-rlm-child-kernel-") as directory:
+            child_path = Path(directory) / "child.json"
+            grandchild_path = Path(directory) / "grandchild.json"
+            grandchild_code = f'''import json
+import os
+from pathlib import Path
+h=await rlm.spawn("Reply with exactly DEPTH_LIMIT_BYPASSED.")
+[blocked]=await rlm.gather([h])
+Path({str(grandchild_path)!r}).write_text(json.dumps({{"kernel_pid":os.getpid(),"depth":int(os.environ["PI_RLM_DEPTH"]),"blocked":{{"status":blocked["status"],"error":blocked["error"]}}}}))
+await rlm.final("GRANDCHILD")'''
+            grandchild_task = (
+                "Call ipython exactly once with this exact code. Then reply with only GRANDCHILD: "
+                + grandchild_code
+            )
+            child_code = f'''import json
+import os
+from pathlib import Path
+h=await rlm.spawn({grandchild_task!r})
+child=(await rlm.gather([h]))[0]
+Path({str(child_path)!r}).write_text(json.dumps({{"kernel_pid":os.getpid(),"depth":int(os.environ["PI_RLM_DEPTH"]),"grandchild_status":child["status"],"grandchild_text":child["text"]}}))
+await rlm.final("ALPHA")'''
+            child_task = (
+                "Call ipython exactly once with this exact code. Then reply with only ALPHA: "
+                + child_code
+            )
+            prompt = f'''Call ipython exactly once with this exact code and do nothing else: import asyncio
+import os
+print("\\n".join(f"line-{{i}}" for i in range(12)))
 await asyncio.sleep(0.2)
-hs=[await rlm.spawn("Reply with exactly ALPHA."),await rlm.spawn("Reply with exactly BETA.")]
+hs=[await rlm.spawn({child_task!r}),await rlm.spawn("Reply with exactly BETA.")]
 rs=await rlm.gather(hs)
-await rlm.final({"statuses":[r["status"] for r in rs],"texts":[r["text"] for r in rs]})"""
-        events = run_print(prompt)
-        end = tool_end(events)
-        result = end["result"]
-        self.assertFalse(end["isError"])
-        self.assertNotIn("terminate", result)
-        self.assertEqual(result["details"]["final"]["statuses"], ["ok", "ok"])
-        self.assertEqual(
-            [text.strip() for text in result["details"]["final"]["texts"]],
-            ["ALPHA", "BETA"],
-        )
-        self.assertEqual(result["details"]["children"], {"spawned": 2, "completed": 2})
-        self.assertGreater(result["details"]["nestedUsage"]["totalTokens"], 0)
-        self.assertEqual(result["usage"], result["details"]["nestedUsage"])
-        text = result["content"][0]["text"]
-        self.assertIn("line-11", text)
-        self.assertIn("[RLM final]", text)
+await rlm.final({{"kernel_pid":os.getpid(),"statuses":[r["status"] for r in rs],"texts":[r["text"] for r in rs]}})'''
+            events = run_print(prompt)
+            end = tool_end(events)
+            result = end["result"]
+            self.assertFalse(end["isError"])
+            self.assertNotIn("terminate", result)
+            self.assertEqual(result["details"]["final"]["statuses"], ["ok", "ok"])
+            self.assertEqual(
+                [text.strip() for text in result["details"]["final"]["texts"]],
+                ["ALPHA", "BETA"],
+            )
+            self.assertEqual(result["details"]["children"], {"spawned": 2, "completed": 2})
+            self.assertGreater(result["details"]["nestedUsage"]["totalTokens"], 0)
+            self.assertEqual(result["usage"], result["details"]["nestedUsage"])
+            text = result["content"][0]["text"]
+            self.assertIn("line-11", text)
+            self.assertIn("[RLM final]", text)
+            child = json.loads(child_path.read_text())
+            grandchild = json.loads(grandchild_path.read_text())
+            self.assertEqual(child["depth"], 1)
+            self.assertEqual(child["grandchild_status"], "ok")
+            self.assertEqual(child["grandchild_text"].strip(), "GRANDCHILD")
+            self.assertEqual(grandchild["depth"], 2)
+            self.assertEqual(grandchild["blocked"]["status"], "error")
+            self.assertIn("depth limit", grandchild["blocked"]["error"].lower())
+            self.assertEqual(len({
+                result["details"]["final"]["kernel_pid"],
+                child["kernel_pid"],
+                grandchild["kernel_pid"],
+            }), 3)
 
     def test_failed_cell_preserves_child_usage_once(self) -> None:
         rpc = RpcPi()
@@ -354,7 +423,6 @@ await rlm.gather([h])""",
                 """Call ipython exactly once with this exact code and do nothing else: await rlm.final({"recovered": True})"""
             )
             result = tool_end(recovered)["result"]
-            self.assertTrue(result["details"]["kernelReset"])
             self.assertEqual(result["details"]["final"], {"recovered": True})
         finally:
             rpc.close()

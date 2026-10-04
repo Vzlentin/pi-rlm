@@ -16,7 +16,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test:host": "node --no-warnings tests/test_host_cancellation.mjs",
-    "test:child": "node --no-warnings tests/test_child_completion.mjs",
+    "test:child": "node --no-warnings tests/test_child_agent.mjs",
     "test:librlm": "node --no-warnings tests/test_librlm.mjs",
     "test:kernel": "node --no-warnings tests/test_kernel.mjs",
     "test:benchmarks": "python3 -m unittest tests.test_oolong_benchmark tests.test_longbench_benchmark",
