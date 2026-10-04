@@ -7,12 +7,13 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 export const LIBRLM_REPOSITORY = "https://github.com/Vzlentin/librlm";
+const LIBRLM_PIN = "bbe2661d6e8cfd99131e67da06c66380730cc349";
 const CLONE_TIMEOUT_MS = 120_000;
-const PULL_TIMEOUT_MS = 15_000;
+const FETCH_TIMEOUT_MS = 15_000;
 
 export interface LibrlmLocation {
 	root: string;
-	/** A clone owned by pi-rlm, updated from librlm main. */
+	/** A clone owned by pi-rlm, kept at its pinned librlm commit. */
 	managed: boolean;
 }
 
@@ -33,22 +34,28 @@ export function resolveLibrlm(env = process.env, home = homedir()): LibrlmLocati
 	return { root: join(data, "pi-rlm", "librlm"), managed: true };
 }
 
-/** Clone the managed checkout on first use, otherwise fast-forward it; a failed pull keeps the clone. */
-export async function syncLibrlm(location: LibrlmLocation, warn: (message: string) => void): Promise<void> {
+/** Keep managed checkouts at the pin without network access when HEAD already matches. */
+export async function syncLibrlm(
+	location: LibrlmLocation,
+	warn: (message: string) => void,
+	repository = LIBRLM_REPOSITORY,
+	pin = LIBRLM_PIN,
+): Promise<void> {
 	if (!location.managed) return;
-	if (!existsSync(join(location.root, ".git"))) {
-		await mkdir(dirname(location.root), { recursive: true });
-		try {
-			await run("git", ["clone", "--quiet", LIBRLM_REPOSITORY, location.root], { timeout: CLONE_TIMEOUT_MS });
-		} catch (error) {
-			throw new Error(`Cannot clone librlm into ${location.root}: ${(error as Error).message}`);
-		}
-		return;
-	}
 	try {
-		await run("git", ["-C", location.root, "pull", "--ff-only", "--quiet"], { timeout: PULL_TIMEOUT_MS });
+		if (!existsSync(join(location.root, ".git"))) {
+			await mkdir(dirname(location.root), { recursive: true });
+			await run("git", ["clone", "--quiet", repository, location.root], { timeout: CLONE_TIMEOUT_MS });
+		} else {
+			const { stdout } = await run("git", ["-C", location.root, "rev-parse", "HEAD"], { timeout: FETCH_TIMEOUT_MS });
+			if (stdout.trim() === pin) return;
+			await run("git", ["-C", location.root, "fetch", "--quiet", "origin", pin], { timeout: FETCH_TIMEOUT_MS });
+		}
+		await run("git", ["-C", location.root, "checkout", "--quiet", "--detach", pin], { timeout: FETCH_TIMEOUT_MS });
 	} catch (error) {
-		warn(`pi-rlm could not update librlm at ${location.root}; using the existing clone. ${(error as Error).message}`);
+		const message = `pi-rlm could not synchronize librlm at ${location.root} to ${pin}: ${(error as Error).message}`;
+		warn(message);
+		throw new Error(message, { cause: error });
 	}
 }
 

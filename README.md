@@ -25,12 +25,15 @@ pi install https://github.com/Vzlentin/pi-ipython
 pi install https://github.com/Vzlentin/pi-rlm
 ```
 
-pi-rlm follows librlm `main`, with no pinned commit. It clones
+pi-rlm uses the librlm commit pinned in `extensions/librlm.ts`. It clones
 `https://github.com/Vzlentin/librlm` into `${XDG_DATA_HOME:-~/.local/share}/pi-rlm/librlm`
-on first use and fast-forwards it at each session start; if the pull fails it
-warns and keeps the existing clone. Set `RLM_LIBRLM_ROOT=/absolute/path` to use
-a development checkout instead (never pulled). A librlm whose host protocol or
-prompt schema pi-rlm does not support fails the kernel start or prompt loudly.
+on first use and checks out the pin with a detached `HEAD`. At session start,
+a clone already at the pin needs no network access. Otherwise, pi-rlm fetches
+and checks out the pin. If synchronization fails, it warns and blocks prompt
+loading and kernel startup. Set `RLM_LIBRLM_ROOT=/absolute/path` to use a
+development checkout instead (never changed by pi-rlm). A librlm whose host
+protocol or prompt schema pi-rlm does not support fails the kernel start or
+prompt loudly.
 
 ## How it works
 
