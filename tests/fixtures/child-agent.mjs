@@ -35,8 +35,8 @@ export async function reapZombies(directory) {
 		await waitFor(() => !processInfo(event.zombie) && !running(event.pid), "fixture zombie reaping");
 	}
 }
-export async function waitFor(predicate, label) {
-	const deadline = Date.now() + 20_000;
+export async function waitFor(predicate, label, timeout = 20_000) {
+	const deadline = Date.now() + timeout;
 	while (Date.now() < deadline) {
 		const result = predicate();
 		if (result) return result;

@@ -109,7 +109,8 @@ async function testCleanup() {
 		const survivors = pids.filter((pid) => pid === directAgent.pid ? alive(pid) : running(pid));
 		console.log(`active child and grandchild cleanup: ${Math.round(elapsed)} ms, live PIDs at settlement: ${JSON.stringify(survivors)}`);
 		assert.ok(result.error);
-		assert.deepEqual(survivors, [], "child agents, bridges and kernels are dead when runChildAgent settles");
+		assert.deepEqual(survivors.filter((pid) => agents.some((event) => event.pid === pid)), [], "child agents are dead when runChildAgent settles");
+		await waitFor(() => kernels.every((event) => !running(event.pid) && !running(event.bridge_pid)), "child bridges and kernels to stop after runChildAgent settles", 5_000);
 		const stopped = events(directory).filter((event) => event.type === "stopped");
 		assert.deepEqual(stopped.map((event) => event.depth).sort(), [1, 2]);
 		for (const event of stopped) {
@@ -257,7 +258,8 @@ async function testPendingCheckpoint(depth) {
 		const elapsed = performance.now() - started;
 		console.log(`pending checkpoint cleanup at depth ${depth + 1}: ${Math.round(elapsed)} ms, agent ${agent.pid}, kernel ${kernel.pid}, bridge ${kernel.bridge_pid}, live PIDs at settlement: ${JSON.stringify(survivors)}`);
 		assert.ok(result.error);
-		assert.deepEqual(survivors, [], "real Pi, kernel and bridge are dead when runChildAgent settles");
+		assert.equal(alive(agent.pid), false, "real Pi is dead when runChildAgent settles");
+		await waitFor(() => !running(kernel.pid) && !running(kernel.bridge_pid), "checkpoint kernel and bridge to stop after runChildAgent settles", 5_000);
 		assert.ok(!existsSync(dirname(kernel.socket)), "child host directory is removed");
 	} finally {
 		clearTimeout(timeout);

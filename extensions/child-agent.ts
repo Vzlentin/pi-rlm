@@ -27,7 +27,7 @@ interface ChildAgentResult {
 }
 
 const CHILD_ROLE = "Complete only your assigned task. Return a complete final answer.";
-const TERMINATION_GRACE_MS = 5_000;
+export const TERMINATION_GRACE_MS = 5_000;
 const DIAGNOSTIC_LIMIT = 16_384;
 
 export async function runChildAgent(
