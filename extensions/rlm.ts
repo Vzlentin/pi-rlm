@@ -1,6 +1,6 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import { formatSize, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createChildCompleter } from "./child-completion.ts";
+import type { ChildAgentCommand } from "./child-agent.ts";
 import { loadRlmPrompt, resolveLibrlm, syncLibrlm, type RlmPrompt } from "./librlm.ts";
 import {
 	addUsage,
@@ -10,6 +10,7 @@ import {
 	MAX_CHILD_REQUEST_BYTES,
 	MAX_CHILD_TEXT_BYTES,
 	MAX_LIVE_HANDLES,
+	MAX_RLM_DEPTH,
 	RlmHostBridge,
 } from "./rlm-host.ts";
 
@@ -64,7 +65,12 @@ function hasUsage(usage: Usage): boolean {
 	return usage.totalTokens > 0 || usage.cost.total > 0;
 }
 
-export default function rlmExtension(pi: ExtensionAPI) {
+export default function rlmExtension(pi: ExtensionAPI, command?: ChildAgentCommand) {
+	const rawDepth = process.env.PI_RLM_DEPTH ?? "0";
+	const depth = Number(rawDepth);
+	if (!/^\d+$/.test(rawDepth) || !Number.isSafeInteger(depth)) {
+		throw new Error("PI_RLM_DEPTH must be a non-negative safe integer");
+	}
 	const location = resolveLibrlm();
 	let latestCtx: ExtensionContext | undefined;
 	let host: RlmHostBridge | undefined;
@@ -74,9 +80,9 @@ export default function rlmExtension(pi: ExtensionAPI) {
 		else console.error(message);
 	};
 	const prepare = () => librlm ??= syncLibrlm(location, warn).then(() => loadRlmPrompt(location.root));
-	const getHost = (ctx: ExtensionContext) => {
+	const getHost = () => {
 		if (host) return host;
-		host = new RlmHostBridge(createChildCompleter(ctx.modelRegistry));
+		host = new RlmHostBridge(location.root, depth, command);
 		host.onActivity = (activity, running) => {
 			const status = running > 0 || activity.spawned > activity.completed
 				? `RLM children: ${running} running, ${activity.completed}/${activity.spawned} done`
@@ -98,7 +104,7 @@ export default function rlmExtension(pi: ExtensionAPI) {
 		event.waitFor((async () => {
 			await prepare();
 			if (!latestCtx) throw new Error("pi-rlm has no session context for child calls");
-			const bridge = getHost(latestCtx);
+			const bridge = getHost();
 			await bridge.ensureStarted();
 			Object.assign(event.env, bridge.environment);
 		})());
@@ -106,6 +112,10 @@ export default function rlmExtension(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		latestCtx = ctx;
+		if (depth >= MAX_RLM_DEPTH) {
+			delete event.systemPromptOptions.sections.rlm;
+			return;
+		}
 		if (!event.systemPromptOptions.selectedTools.includes("ipython")) return;
 		const prompt = await prepare();
 		event.systemPromptOptions.sections.rlm = [
@@ -118,7 +128,7 @@ export default function rlmExtension(pi: ExtensionAPI) {
 	pi.on("tool_execution_start", (event, ctx) => {
 		if (event.toolName !== "ipython") return;
 		latestCtx = ctx;
-		getHost(ctx).setConfig({ cwd: ctx.cwd, model: ctx.model, thinkingLevel: pi.getThinkingLevel() });
+		getHost().setConfig({ cwd: ctx.cwd, model: ctx.model, thinkingLevel: pi.getThinkingLevel() });
 	});
 
 	pi.on("tool_result", (event, ctx) => {
