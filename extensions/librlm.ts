@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 export const LIBRLM_REPOSITORY = "https://github.com/Vzlentin/librlm";
-const LIBRLM_PIN = "bbe2661d6e8cfd99131e67da06c66380730cc349";
+const LIBRLM_PIN = "fe4c01adcd5c223d49fcee8c420b2d1574aca6c6";
 const CLONE_TIMEOUT_MS = 120_000;
 const FETCH_TIMEOUT_MS = 15_000;
 
