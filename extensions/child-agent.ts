@@ -20,15 +20,19 @@ interface ChildAgentRequest {
 	librlmRoot: string;
 }
 
-interface ChildAgentResult {
+export interface ChildAgentResult {
 	text: string;
 	usage: Usage;
 	error?: string;
 }
 
-const CHILD_ROLE = "Complete only your assigned task. Return a complete final answer.";
+export const CHILD_ROLE = "Complete only your assigned task. Return a complete final answer.";
 export const TERMINATION_GRACE_MS = 5_000;
 const DIAGNOSTIC_LIMIT = 16_384;
+
+export function childPrompt(task: string, context: string | null): string {
+	return context === null ? task : `${task}\n\n<context>\n${context}\n</context>`;
+}
 
 export async function runChildAgent(
 	request: ChildAgentRequest,
@@ -122,7 +126,7 @@ export async function runChildAgent(
 	});
 	request.signal.addEventListener("abort", terminate, { once: true });
 	if (request.signal.aborted) terminate();
-	child.stdin.end(request.context === null ? request.task : `${request.task}\n\n<context>\n${request.context}\n</context>`);
+	child.stdin.end(childPrompt(request.task, request.context));
 	await closed;
 	terminate();
 	await cleanup;

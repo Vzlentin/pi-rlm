@@ -1,18 +1,8 @@
 import type { Usage } from "@earendil-works/pi-ai";
-import { formatSize, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ChildAgentCommand } from "./child-agent.ts";
-import { loadRlmPrompt, resolveLibrlm, syncLibrlm, type RlmPrompt } from "./librlm.ts";
-import {
-	addUsage,
-	emptyUsage,
-	HOST_PROTOCOL_VERSION,
-	MAX_CHILDREN_RUNNING,
-	MAX_CHILD_REQUEST_BYTES,
-	MAX_CHILD_TEXT_BYTES,
-	MAX_LIVE_HANDLES,
-	MAX_RLM_DEPTH,
-	RlmHostBridge,
-} from "./rlm-host.ts";
+import { loadRlmPrompt, resolveLibrlm, rlmSection, syncLibrlm, type RlmPrompt } from "./librlm.ts";
+import { addUsage, emptyUsage, HOST_PROTOCOL_VERSION, MAX_RLM_DEPTH, RlmHostBridge } from "./rlm-host.ts";
 
 /** pi-ipython's hook, emitted on `pi.events` before every kernel start. */
 export const KERNEL_STARTING_EVENT = "ipython:kernel-starting";
@@ -118,11 +108,7 @@ export default function rlmExtension(pi: ExtensionAPI, command?: ChildAgentComma
 		}
 		if (!event.systemPromptOptions.selectedTools.includes("ipython")) return;
 		const prompt = await prepare();
-		event.systemPromptOptions.sections.rlm = [
-			prompt.rlmApi,
-			prompt.rlmGuidance,
-			`Child calls are limited to ${MAX_CHILDREN_RUNNING} concurrent/${MAX_LIVE_HANDLES} live handles, ${formatSize(MAX_CHILD_REQUEST_BYTES)} input, ${formatSize(MAX_CHILD_TEXT_BYTES)} returned text, and a 5-minute deadline. rlm.final prints its value at the end of the cell's output; it does not end the turn.`,
-		].join("\n\n");
+		event.systemPromptOptions.sections.rlm = rlmSection(prompt);
 	});
 
 	pi.on("tool_execution_start", (event, ctx) => {

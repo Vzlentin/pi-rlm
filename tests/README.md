@@ -3,7 +3,9 @@
 `npm test` is model-free. It runs typechecking, host cancellation, headless child
 sessions, librlm location and update, benchmark data-isolation tests, and a real
 kernel test through pi-ipython: the prompt section, cross-cell handles, usage
-attribution, `rlm.final`, cwd, gather cancellation, and depth rejection.
+attribution, `rlm.final`, cwd, gather cancellation, and depth rejection. The
+durable test runs both packages' pi-durable adapters with a faux model: a child
+conversation owned by the cell's call, its gathered answer, and cancellation.
 
 The kernel test needs a pi-ipython checkout (`PI_IPYTHON_ROOT`, default
 `../pi-ipython`, with `npm install` run) and librlm (`RLM_LIBRLM_ROOT`, default

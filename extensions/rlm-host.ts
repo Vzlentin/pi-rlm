@@ -5,8 +5,8 @@ import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Usage } from "@earendil-works/pi-ai";
-import { formatSize, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { runChildAgent, TERMINATION_GRACE_MS, type ChildAgentCommand } from "./child-agent.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { runChildAgent, TERMINATION_GRACE_MS, type ChildAgentCommand, type ChildAgentResult } from "./child-agent.ts";
 
 export const MAX_CHILDREN_RUNNING = 4;
 export const MAX_LIVE_HANDLES = 16;
@@ -61,6 +61,11 @@ interface HostRequest {
 	context: string | null;
 	cwd: string;
 }
+
+export type ChildRequest = Pick<HostRequest, "task" | "context" | "cwd">;
+
+/** Admits one child when the host gets its request; the returned function runs it. */
+type ChildStart = (request: ChildRequest) => (signal: AbortSignal) => Promise<ChildAgentResult>;
 
 interface HostResponse {
 	version: 2;
@@ -183,14 +188,17 @@ export class RlmHostBridge {
 	/** Called whenever a child starts or settles. */
 	onActivity?: (activity: ChildActivity, running: number) => void;
 
-	private readonly librlmRoot: string;
 	private readonly depth: number;
-	private readonly command?: ChildAgentCommand;
+	private readonly startChild: ChildStart;
 
-	constructor(librlmRoot: string, depth = 0, command?: ChildAgentCommand) {
-		this.librlmRoot = librlmRoot;
+	constructor(librlmRoot: string, depth = 0, command?: ChildAgentCommand, start?: ChildStart) {
 		this.depth = depth;
-		this.command = command;
+		this.startChild = start ?? (({ task, context, cwd }) => {
+			const config = this.config;
+			if (!config?.model) throw new Error("No active model is available for child creation");
+			const { model, thinkingLevel } = config;
+			return (signal) => runChildAgent({ model, thinkingLevel, cwd, task, context, signal, depth, librlmRoot }, command);
+		});
 	}
 
 	/** Children use the config of the running (or most recent) ipython call. */
@@ -200,6 +208,11 @@ export class RlmHostBridge {
 
 	get running(): number {
 		return this.children.size;
+	}
+
+	/** Aborts every child; each one settles on its own. */
+	cancelChildren(): void {
+		for (const record of this.children) record.controller.abort(new Error("The ipython cell ended"));
 	}
 
 	takeActivity(): ChildActivity {
@@ -341,20 +354,19 @@ export class RlmHostBridge {
 		if (!request.task.trim()) throw new Error("child task must not be empty");
 		const requestBytes = utf8Bytes(request.task) + (request.context === null ? 0 : utf8Bytes(request.context));
 		if (requestBytes > MAX_CHILD_REQUEST_BYTES) {
-			throw new Error(`Child task and context exceed ${formatSize(MAX_CHILD_REQUEST_BYTES)}`);
+			throw new Error(`Child task and context exceed 1 MiB`);
 		}
 		if (this.children.size >= MAX_LIVE_HANDLES) {
 			throw new Error(`At most ${MAX_LIVE_HANDLES} child completions may be active`);
 		}
-		const config = this.config;
-		if (!config?.model) throw new Error("No active model is available for child creation");
+		const run = this.startChild(request);
 
 		const record: ChildRecord = {
 			controller: new AbortController(),
 			promise: undefined as unknown as Promise<ChildResult>,
 			timedOut: false,
 		};
-		record.promise = this.runChild(record, config, request);
+		record.promise = this.runChild(record, run);
 		this.children.add(record);
 		this.activity.spawned += 1;
 		this.onActivity?.(this.activity, this.children.size);
@@ -365,7 +377,7 @@ export class RlmHostBridge {
 			const result = await record.promise;
 			const response = this.success(request.id, result);
 			if (utf8Bytes(JSON.stringify(response)) + 1 > MAX_HOST_RESPONSE_BYTES) {
-				throw new Error(`Child response exceeds ${formatSize(MAX_HOST_RESPONSE_BYTES)}`);
+				throw new Error(`Child response exceeds 5 MiB`);
 			}
 			return response;
 		} finally {
@@ -377,11 +389,7 @@ export class RlmHostBridge {
 		}
 	}
 
-	private async runChild(
-		record: ChildRecord,
-		config: ChildConfig,
-		request: HostRequest,
-	): Promise<ChildResult> {
+	private async runChild(record: ChildRecord, run: (signal: AbortSignal) => Promise<ChildAgentResult>): Promise<ChildResult> {
 		const started = Date.now();
 		let release: (() => void) | undefined;
 		let usage = emptyUsage();
@@ -392,17 +400,7 @@ export class RlmHostBridge {
 		try {
 			release = await this.limiter.acquire(record.controller.signal);
 			if (record.controller.signal.aborted) throw new Error("Child cancelled before startup");
-			if (!config.model) throw new Error("No active model is available for child creation");
-			const response = await runChildAgent({
-				model: config.model,
-				thinkingLevel: config.thinkingLevel,
-				signal: record.controller.signal,
-				cwd: request.cwd,
-				task: request.task,
-				context: request.context,
-				depth: this.depth,
-				librlmRoot: this.librlmRoot,
-			}, this.command);
+			const response = await run(record.controller.signal);
 			usage = response.usage;
 			if (response.error) throw new Error(response.error);
 			const bounded = truncateUtf8(response.text, MAX_CHILD_TEXT_BYTES);
