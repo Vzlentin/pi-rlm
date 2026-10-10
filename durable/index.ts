@@ -7,8 +7,8 @@
  * the kernel cancels the children it spawned and the bridge aborts their conversations.
  *
  * The owner task stays open between cells because librlm can start a queued child after its cell has ended, and the
- * cell's call cannot create or run anything once it has ended. Costs: one open task per conversation, and until
- * pi-durable has `abandonOnRestart`, a normal stop ends it as failed so that pi-durable aborts the children it owns.
+ * cell's call cannot create or run anything once it has ended. Cost: one open task per conversation. A restart
+ * abandons the task with its children.
  */
 import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
@@ -73,7 +73,7 @@ export default function rlm({ durable, events }: DurableHost) {
 	// Child conversation ID to RLM depth; roots are absent, at depth 0. Lost on restart, like the kernels and handles.
 	const depths = new Map<string, number>();
 	const depthOf = (id: ConversationId) => depths.get(String(id)) ?? 0;
-	// Owner key to this process's waiter. After a restart an owner task finds none, so it fails and aborts its children.
+	// Owner key to this process's waiter. Lost on restart; pi-durable then abandons the owner task before it runs again.
 	const waiters = new Map<string, OwnerWaiter>();
 
 	const OwnerTask = durable.defineTask<OwnerInput, OwnerState, null>({
@@ -83,23 +83,18 @@ export default function rlm({ durable, events }: DurableHost) {
 		phases: {
 			serve: async (task, runtime, context) => {
 				const waiter = waiters.get(task.input.key);
+				if (!waiter) throw new Error("No RLM owner waiter in this process");
 				try {
-					if (waiter) {
-						await new Promise<void>((resolve, reject) => {
-							const signal = context.abortSignal;
-							if (signal?.aborted) return reject(signal.reason);
-							signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
-							waiter.stop = resolve;
-							waiter.started({ runtime, context });
-						});
-					}
-					// A failed outcome aborts the child conversations this task still owns.
-					await runtime.commit(
-						() => ({ status: "terminal", outcome: { status: "failed", error: { message: "RLM children stopped" } } }),
-						context,
-					);
+					await new Promise<void>((resolve, reject) => {
+						const signal = context.abortSignal;
+						if (signal?.aborted) return reject(signal.reason);
+						signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+						waiter.stop = resolve;
+						waiter.started({ runtime, context });
+					});
+					await runtime.commit(() => ({ status: "terminal", outcome: { status: "completed", result: null } }), context);
 				} finally {
-					waiter?.ended();
+					waiter.ended();
 				}
 			},
 		},
@@ -138,7 +133,7 @@ export default function rlm({ durable, events }: DurableHost) {
 			};
 			waiters.set(key, { started: resolve, ended: () => end(new Error("The RLM owner task ended")) });
 			cell.api
-				.createTask(OwnerTask, { key }, { ownership: { kind: "conversation" }, background: true }, cell.context)
+				.createTask(OwnerTask, { key }, { ownership: { kind: "conversation" }, background: true, abandonOnRestart: true }, cell.context)
 				.catch(end);
 		});
 		owner.catch(() => {});

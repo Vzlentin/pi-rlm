@@ -39,6 +39,7 @@ const CELLS = {
 	fail: [`h = await rlm.spawn('hang fail')\n${awaitStarted("fail")}\nraise ValueError('fixture')`],
 	nested: ["h = await rlm.spawn('agent')\n[r] = await rlm.gather([h])\nprint(r.status, r.text)"],
 	restart: ["h = await rlm.spawn('hang restart')\nprint('spawned')"],
+	close: ["h = await rlm.spawn('hang close')\nprint('spawned')"],
 };
 const AGENT_CELL = `g = await rlm.spawn('hang grandchild')\n${awaitStarted("grandchild")}\nprint('spawned')`;
 const started = new Set();
@@ -83,7 +84,8 @@ faux.setResponses(Array.from({ length: 100 }, () => async (request, options) => 
 /** A host with pi-ipython and pi-rlm on one bus. */
 async function openHost(storage = new MemoryStorage()) {
 	const events = new EventEmitter();
-	const packages = [ipython({ durable, ai, events }), rlm({ durable, ai, events })];
+	const pirlm = rlm({ durable, ai, events });
+	const packages = [ipython({ durable, ai, events }), pirlm];
 	const registry = durable.createRegistry();
 	for (const extension of packages.flatMap((item) => item.extensions)) registry.install(extension);
 	const harness = await durable.Harness.open(storage, { models, registry }, context);
@@ -91,6 +93,7 @@ async function openHost(storage = new MemoryStorage()) {
 	return {
 		harness,
 		conversation,
+		rlm: pirlm,
 		read: (change) => conversation.commit(change, context),
 		async close() {
 			try {
@@ -178,6 +181,21 @@ try {
 		await host.close();
 	}
 
+	const ownerTasks = async (host) =>
+		(await host.read((tx) => tx.scanTasks({}, 100))).items.filter((task) => task.kind === "pi-rlm.children");
+
+	host = await openHost();
+	try {
+		assert.deepEqual(await run(host, "close"), ["spawned"]);
+		await until(() => started.has("close"), "the child starts");
+		await host.rlm.close();
+		await until(async () => (await ownerTasks(host)).every((task) => task.state.status === "terminal"), "the owner task ends");
+		assert.deepEqual((await ownerTasks(host)).map((task) => task.state.outcome.status), ["completed"]);
+		assert.ok(aborted.has("close"), "close() aborts the child's model request");
+	} finally {
+		await host.close();
+	}
+
 	// The turn ends with the child still running, then the process stops. Nothing can gather the child after a restart.
 	const storage = join(root, "restart.sqlite");
 	host = await openHost(await openNodeSqliteStorage(storage));
@@ -193,11 +211,12 @@ try {
 		host.harness.resume();
 		const live = async () => (await host.read((tx) => tx.scanTasks({}, 100))).items.filter((task) => task.state.status !== "terminal");
 		await until(async () => (await live()).length === 0, "a restart stops the children of the last process");
+		assert.deepEqual((await ownerTasks(host)).map((task) => task.state.outcome.status), ["aborted"]);
 	} finally {
 		await host.close();
 	}
 
-	console.log("durable: background-owned child, cross-cell gather, cancellation, failed cell, depth 2 and restart passed");
+	console.log("durable: background-owned child, cross-cell gather, cancellation, failed cell, depth 2, close and restart passed");
 } finally {
 	rmSync(root, { recursive: true, force: true });
 }
