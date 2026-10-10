@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -14,7 +14,7 @@ const ipythonRoot = resolve(process.env.PI_IPYTHON_ROOT ?? fileURLToPath(new URL
 if (!existsSync(join(ipythonRoot, "extensions", "kernel-runtime.ts"))) {
 	throw new Error(`pi-ipython checkout not found at ${ipythonRoot}; set PI_IPYTHON_ROOT`);
 }
-process.env.RLM_LIBRLM_ROOT ??= join(homedir(), "Dev", "librlm");
+process.env.RLM_LIBRLM_ROOT ??= fileURLToPath(new URL("../../librlm", import.meta.url));
 const { KernelRuntime } = await import(pathToFileURL(join(ipythonRoot, "extensions", "kernel-runtime.ts")).href);
 const { default: rlmExtension } = await import("../extensions/rlm.ts");
 const exec = promisify(execFile);

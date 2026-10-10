@@ -10,7 +10,7 @@ a failed cell, a grandchild left running at depth 2, and a restart.
 
 The kernel test needs a pi-ipython checkout (`PI_IPYTHON_ROOT`, default
 `../pi-ipython`, with `npm install` run) and librlm (`RLM_LIBRLM_ROOT`, default
-`~/Dev/librlm`).
+`../librlm`).
 
 Do not add tests that match source strings, pin method names, or merely restate
 implementation constants. Use the child process fixture across runner, host, and

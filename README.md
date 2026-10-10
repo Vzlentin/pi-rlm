@@ -71,7 +71,7 @@ npm test
 ```
 
 The kernel tests need a sibling pi-ipython checkout (`../pi-ipython`, or
-`PI_IPYTHON_ROOT`) and librlm (`RLM_LIBRLM_ROOT`, default `~/Dev/librlm`). See
+`PI_IPYTHON_ROOT`) and librlm (`RLM_LIBRLM_ROOT`, default `../librlm`). See
 [tests/README.md](tests/README.md) for the model-backed acceptance tests.
 
 ## Paper benchmarks

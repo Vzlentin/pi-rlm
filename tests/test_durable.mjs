@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -17,7 +17,7 @@ const ipythonRoot = resolve(process.env.PI_IPYTHON_ROOT ?? fileURLToPath(new URL
 if (!existsSync(join(ipythonRoot, "durable", "index.ts"))) {
 	throw new Error(`pi-ipython checkout with durable/index.ts not found at ${ipythonRoot}; set PI_IPYTHON_ROOT`);
 }
-process.env.RLM_LIBRLM_ROOT ??= join(homedir(), "Dev", "librlm");
+process.env.RLM_LIBRLM_ROOT ??= fileURLToPath(new URL("../../librlm", import.meta.url));
 const { default: ipython } = await import(pathToFileURL(join(ipythonRoot, "durable", "index.ts")).href);
 const { default: rlm } = await import("../durable/index.ts");
 
