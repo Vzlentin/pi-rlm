@@ -210,11 +210,6 @@ export class RlmHostBridge {
 		return this.children.size;
 	}
 
-	/** Aborts every child; each one settles on its own. */
-	cancelChildren(): void {
-		for (const record of this.children) record.controller.abort(new Error("The ipython cell ended"));
-	}
-
 	takeActivity(): ChildActivity {
 		const activity = this.activity;
 		this.activity = { spawned: 0, completed: 0, usage: emptyUsage() };

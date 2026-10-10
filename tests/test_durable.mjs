@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -10,6 +10,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import * as durable from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 // Node cannot strip TypeScript types under node_modules.
 const ipythonRoot = resolve(process.env.PI_IPYTHON_ROOT ?? fileURLToPath(new URL("../../pi-ipython", import.meta.url)));
@@ -26,19 +27,71 @@ const faux = fauxProvider({ models: [{ id: "model" }] });
 const models = createModels();
 models.setProvider(faux.provider);
 
-/** A host with pi-ipython and pi-rlm on one bus; `taskIds` gets the owning task of every ipython cell. */
-async function openHost() {
+/** Python that waits until the faux model has received the request of child `name`. */
+const awaitStarted = (name) =>
+	`import asyncio, os\nwhile not os.path.exists(${JSON.stringify(join(root, `${name}.started`))}):\n    await asyncio.sleep(0.02)`;
+
+// Each root conversation runs the cells listed under its input. Children are named by their task.
+const CELLS = {
+	same: ["h = await rlm.spawn('fast')\n[r] = await rlm.gather([h])\nprint(r.status, r.text)"],
+	cross: ["h = await rlm.spawn('after first cell')\nprint('spawned')", "[r] = await rlm.gather([h])\nprint(r.status, r.text)"],
+	cancel: ["h = await rlm.spawn('hang cancel')\nawait rlm.gather([h])"],
+	fail: [`h = await rlm.spawn('hang fail')\n${awaitStarted("fail")}\nraise ValueError('fixture')`],
+	nested: ["h = await rlm.spawn('agent')\n[r] = await rlm.gather([h])\nprint(r.status, r.text)"],
+	restart: ["h = await rlm.spawn('hang restart')\nprint('spawned')"],
+};
+const AGENT_CELL = `g = await rlm.spawn('hang grandchild')\n${awaitStarted("grandchild")}\nprint('spawned')`;
+const started = new Set();
+const aborted = new Set();
+let firstCellSeen;
+const firstCell = new Promise((resolve) => (firstCellSeen = resolve));
+
+const textOf = (message) =>
+	typeof message.content === "string"
+		? message.content
+		: message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+const call = (code) => fauxAssistantMessage(fauxToolCall("ipython", { code }), { stopReason: "toolUse" });
+const abortOf = (signal) =>
+	new Promise((resolve) => {
+		if (signal?.aborted) resolve();
+		signal?.addEventListener("abort", resolve, { once: true });
+	});
+
+faux.setResponses(Array.from({ length: 100 }, () => async (request, options) => {
+	const messages = request.messages.filter((message) => message.role !== "system");
+	const first = textOf(messages[0]);
+	const results = messages.filter((message) => message.role === "toolResult").length;
+	if (Object.hasOwn(CELLS, first)) {
+		if (first === "cross" && results === 1) firstCellSeen();
+		return results < CELLS[first].length ? call(CELLS[first][results]) : fauxAssistantMessage("done");
+	}
+	if (first === "agent") return results === 0 ? call(AGENT_CELL) : fauxAssistantMessage("teal");
+	if (first === "fast") return fauxAssistantMessage("teal");
+	if (first === "after first cell") {
+		// Answers only once the parent's model has the first cell's result, so a held turn never settles.
+		await Promise.race([firstCell, abortOf(options?.signal)]);
+		return fauxAssistantMessage("teal");
+	}
+	const name = first.replace(/^hang /, "");
+	started.add(name);
+	writeFileSync(join(root, `${name}.started`), "");
+	await abortOf(options?.signal);
+	aborted.add(name);
+	return fauxAssistantMessage("", { stopReason: "aborted" });
+}));
+
+/** A host with pi-ipython and pi-rlm on one bus. */
+async function openHost(storage = new MemoryStorage()) {
 	const events = new EventEmitter();
-	const taskIds = [];
-	events.on("ipython:cell-start", ({ api }) => taskIds.push(api.taskId));
 	const packages = [ipython({ durable, ai, events }), rlm({ durable, ai, events })];
 	const registry = durable.createRegistry();
 	for (const extension of packages.flatMap((item) => item.extensions)) registry.install(extension);
-	const harness = await durable.Harness.open(new MemoryStorage(), { models, registry }, context);
+	const harness = await durable.Harness.open(storage, { models, registry }, context);
 	const conversation = await harness.root(context, { agent: { model: { provider: "faux", modelId: "model" }, cwd: root } });
 	return {
+		harness,
 		conversation,
-		taskIds,
+		read: (change) => conversation.commit(change, context),
 		async close() {
 			try {
 				await harness.close(context);
@@ -49,91 +102,102 @@ async function openHost() {
 	};
 }
 
-function toolResultText(entries) {
-	const entry = entries.find((item) => durable.ToolResultEntry.is(item));
-	assert.ok(entry, "the turn has a tool result");
-	return entry.model[0].content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+async function within(promise, what, ms = 10_000) {
+	let timer;
+	const timeout = new Promise((_, reject) => {
+		timer = setTimeout(() => reject(new Error(`timed out: ${what}`)), ms);
+	});
+	try {
+		return await Promise.race([promise, timeout]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+async function until(check, what, ms = 10_000) {
+	const end = Date.now() + ms;
+	while (!(await check())) {
+		if (Date.now() > end) throw new Error(`timed out: ${what}`);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+}
+
+async function run(host, input) {
+	const submission = await host.conversation.submit({ type: "input", content: input, requestId: input }, context);
+	const settled = await within(submission.wait(context), `the ${input} turn`);
+	assert.equal(settled.status, "done", settled.reason);
+	const page = await host.conversation.entries({}, 50, undefined, context);
+	return page.items
+		.filter((item) => durable.ToolResultEntry.is(item))
+		.map((entry) => entry.model[0].content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n").trim())
+		.reverse();
 }
 
 try {
 	let host = await openHost();
 	try {
-		const code = "h = await rlm.spawn('name the colour')\n[r] = await rlm.gather([h])\nprint(r.status, r.text)";
-		faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("ipython", { code }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("child says teal"),
-			fauxAssistantMessage("done"),
-		]);
-		const submission = await host.conversation.submit({ type: "input", content: "spawn", requestId: "spawn" }, context);
-		const settled = await submission.wait(context);
-		assert.equal(settled.status, "done", settled.reason);
-		const page = await host.conversation.entries({}, 50, undefined, context);
-		assert.match(toolResultText(page.items), /^ok child says teal$/m, "rlm.gather returns the child's answer");
-		assert.equal(host.taskIds.length, 1);
-		const owned = await host.conversation.commit((tx) => tx.scanConversations({ ownerTaskId: host.taskIds[0] }, 10), context);
-		assert.equal(owned.items.length, 1, "the child conversation is owned by the cell's call");
+		assert.deepEqual(await run(host, "same"), ["ok teal"], "rlm.gather returns the child's answer");
+		const conversations = await host.read((tx) => tx.scanConversations({}, 10));
+		const [child] = conversations.items.filter((item) => item.owner !== undefined);
+		const owner = await host.read((tx) => tx.task(child.owner.taskId));
+		assert.equal(owner.background, true, "a background task of the conversation owns the child, not the cell's call");
 	} finally {
 		await host.close();
 	}
 
 	host = await openHost();
 	try {
-		let started;
-		const childStarted = new Promise((resolve) => (started = resolve));
-		let childAborted = false;
-		const code = "h = await rlm.spawn('wait forever')\nawait rlm.gather([h])";
-		faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("ipython", { code }), { stopReason: "toolUse" }),
-			async (_context, options) => {
-				started();
-				await new Promise((resolve) => {
-					if (options?.signal?.aborted) resolve();
-					options?.signal?.addEventListener("abort", resolve, { once: true });
-				});
-				childAborted = true;
-				return fauxAssistantMessage("", { stopReason: "aborted" });
-			},
-		]);
+		assert.deepEqual(await run(host, "cross"), ["spawned", "ok teal"], "a later cell gathers a child that outlived its cell");
+	} finally {
+		await host.close();
+	}
+
+	host = await openHost();
+	try {
 		await host.conversation.submit({ type: "input", content: "cancel", requestId: "cancel" }, context);
-		await childStarted;
+		await until(() => started.has("cancel"), "the child starts");
 		await host.conversation.abort(context);
-		assert.equal(childAborted, true, "cancelling the cell aborts the child's model request");
+		await until(() => aborted.has("cancel"), "cancelling the cell aborts the child's model request");
 	} finally {
 		await host.close();
 	}
 
 	host = await openHost();
 	try {
-		let childAborted = false;
-		const code = "h = await rlm.spawn('x')\nimport asyncio\nawait asyncio.sleep(0.2)\nraise ValueError('fixture')";
-		faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("ipython", { code }), { stopReason: "toolUse" }),
-			async (_context, options) => {
-				await new Promise((resolve) => {
-					if (options?.signal?.aborted) resolve();
-					options?.signal?.addEventListener("abort", resolve, { once: true });
-				});
-				childAborted = true;
-				return fauxAssistantMessage("", { stopReason: "aborted" });
-			},
-			fauxAssistantMessage("done"),
-		]);
-		const submission = await host.conversation.submit({ type: "input", content: "fail", requestId: "fail" }, context);
-		let timer;
-		const timeout = new Promise((_, reject) => {
-			timer = setTimeout(() => reject(new Error("the failed cell did not settle")), 10_000);
-		});
-		try {
-			await Promise.race([submission.wait(context), timeout]);
-		} finally {
-			clearTimeout(timer);
-		}
-		assert.equal(childAborted, true, "a failed cell aborts the child it spawned");
+		assert.match((await run(host, "fail"))[0], /ValueError: fixture/);
+		await until(() => aborted.has("fail"), "a failed cell aborts the child it spawned");
 	} finally {
 		await host.close();
 	}
 
-	console.log("durable: task-owned child, gather answer, cancellation and failed-cell cancellation passed");
+	host = await openHost();
+	try {
+		assert.deepEqual(await run(host, "nested"), ["ok teal"]);
+		await until(() => aborted.has("grandchild"), "a child's answer stops the grandchild it left running");
+	} finally {
+		await host.close();
+	}
+
+	// The turn ends with the child still running, then the process stops. Nothing can gather the child after a restart.
+	const storage = join(root, "restart.sqlite");
+	host = await openHost(await openNodeSqliteStorage(storage));
+	try {
+		assert.deepEqual(await run(host, "restart"), ["spawned"]);
+		await until(() => started.has("restart"), "the child starts");
+		await within(host.conversation.waitForIdle(context), "the conversation is idle while its child runs");
+	} finally {
+		await host.close();
+	}
+	host = await openHost(await openNodeSqliteStorage(storage));
+	try {
+		host.harness.resume();
+		const live = async () => (await host.read((tx) => tx.scanTasks({}, 100))).items.filter((task) => task.state.status !== "terminal");
+		await until(async () => (await live()).length === 0, "a restart stops the children of the last process");
+	} finally {
+		await host.close();
+	}
+
+	console.log("durable: background-owned child, cross-cell gather, cancellation, failed cell, depth 2 and restart passed");
 } finally {
 	rmSync(root, { recursive: true, force: true });
 }

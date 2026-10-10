@@ -5,7 +5,8 @@ sessions, librlm location and update, benchmark data-isolation tests, and a real
 kernel test through pi-ipython: the prompt section, cross-cell handles, usage
 attribution, `rlm.final`, cwd, gather cancellation, and depth rejection. The
 durable test runs both packages' pi-durable adapters with a faux model: a child
-conversation owned by the cell's call, its gathered answer, and cancellation.
+owned by a background task, gather in the same and in a later cell, cancellation,
+a failed cell, a grandchild left running at depth 2, and a restart.
 
 The kernel test needs a pi-ipython checkout (`PI_IPYTHON_ROOT`, default
 `../pi-ipython`, with `npm install` run) and librlm (`RLM_LIBRLM_ROOT`, default
