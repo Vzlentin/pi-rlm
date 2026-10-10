@@ -4,6 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { MAX_CHILDREN_RUNNING, MAX_CHILD_REQUEST_BYTES, MAX_CHILD_TEXT_BYTES, MAX_LIVE_HANDLES } from "./rlm-host.ts";
 
 const run = promisify(execFile);
 export const LIBRLM_REPOSITORY = "https://github.com/Vzlentin/librlm";
@@ -75,4 +76,13 @@ export function loadRlmPrompt(root: string): RlmPrompt {
 		throw new Error(`Invalid RLM instructions at ${path}: pi-rlm needs schema librlm.ipython-prompt.v1 with rlmApi and rlmGuidance`);
 	}
 	return { rlmApi: value.rlmApi as string, rlmGuidance: value.rlmGuidance as string };
+}
+
+/** The `rlm` system prompt section. */
+export function rlmSection(prompt: RlmPrompt): string {
+	return [
+		prompt.rlmApi,
+		prompt.rlmGuidance,
+		`Child calls are limited to ${MAX_CHILDREN_RUNNING} concurrent/${MAX_LIVE_HANDLES} live handles, ${MAX_CHILD_REQUEST_BYTES / 1024 ** 2} MiB input, ${MAX_CHILD_TEXT_BYTES / 1024} KiB returned text, and a 5-minute deadline. rlm.final prints its value at the end of the cell's output; it does not end the turn.`,
+	].join("\n\n");
 }
